@@ -136,11 +136,17 @@ class HumanDepthEstimator:
             # run YOLO
             det_result = self.det_model(img)[0]
             person_bbox = None
+            # handeling multiple persons by selecting the box with max area
+            max_area = -1
 
             for box in det_result.boxes:
                 if int(box.cls[0]) == 0:  # Assuming class 0 is 'person'
-                    person_bbox = box.xyxy[0].cpu().numpy().astype(int)
-                    break
+                    xyxy = box.xyxy[0].cpu().numpy()
+                    x1, y1, x2, y2 = xyxy
+                    area = (x2 - x1) * (y2 - y1)
+                    if area > max_area:
+                        max_area = area
+                        person_bbox = xyxy.astype(int)
 
             if person_bbox is None:
                 print(f"No person detected in {file_img}. Skipping.")
@@ -228,14 +234,141 @@ class HumanDepthEstimator:
             else:
                 results[file_img] = {
                 'img_file_path': full_img_path,
-                'depth': median_depth,
+                'depth': np.round(median_depth,2),
                 'human_mask': mask,
                 'person_bbox': person_bbox
                  }
                 
         return results
 
+class HumanDepthEstimatorPF(HumanDepthEstimator):
+    def __init__(self, config_path, args=None):
+        super().__init__(config_path, args)
+    
+    def _dir_output_dirs(self):
 
+        if not os.path.exists(self.save_dir):
+            print(f"[PF] Creating directory:{self.save_dir}")
+            os.makedirs(self.save_dir, exist_ok=True)
+        else:
+            print(f"[PF] Directory already exists: {self.save_dir}")
+
+    def run_on_frame(self, img_path, pcd_path):
+        """
+        Run depth estimation for a single RGB frame.
+        Returns:
+            dict: {
+                'depth': float,
+                'mask': np.ndarray,
+                'bbox': np.ndarray,
+            }
+        """
+        """
+        NOTE: img_path and pcd_path are full path dirs
+        """
+        result = {}
+        pcd = o3d.io.read_point_cloud(pcd_path)
+        if pcd.is_empty():
+            print(f"Empty point cloud: {pcd_path}")
+            return None
+        scene_points = np.asarray(pcd.points)
+        
+        img = cv2.imread(img_path)
+        det_result = self.det_model(img)[0]
+        person_bbox = None
+        max_area = -1
+        
+        for box in det_result.boxes:
+                if int(box.cls[0]) == 0:  # Assuming class 0 is 'person'
+                    xyxy = box.xyxy[0].cpu().numpy()
+                    x1, y1, x2, y2 = xyxy
+                    area = (x2 - x1) * (y2 - y1)
+                    if area > max_area:
+                        max_area = area
+                        person_bbox = xyxy.astype(int)
+                        
+        if person_bbox is None:
+                print(f"No person detected in {img}. Skipping.")
+                return None
+        
+        x1, y1, x2, y2 = person_bbox
+        padding = self.args.padding
+        x1, y1, x2, y2 = max(0, x1 - padding), max(0, y1 - padding), min(img.shape[1] - 1, x2 + padding), min(img.shape[0] - 1, y2 + padding)
+        
+        cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
+        cropped_img = img[y1:y2, x1:x2]  
+        seg_result = self.seg_model.predict(cropped_img, classes=[0], save=False)[0]
+        cropped_mask_data = seg_result.masks.data.cpu().numpy()[0] if seg_result.masks else None
+        if cropped_mask_data is None:
+            print(f"No segmentation mask for {img_path}. Skipping.")
+            return None
+
+        crop_h, crop_w = cropped_img.shape[:2]
+        resized_crop_mask = cv2.resize(cropped_mask_data, (crop_w, crop_h))
+
+        binary_crop_mask = (resized_crop_mask > self.args.seg_conf).astype(np.uint8)
+        
+        mask = np.zeros(img.shape[:2], dtype=np.uint8)
+        
+        mask[y1:y2, x1:x2] = binary_crop_mask
+
+        # colour the mask
+        colored_mask = np.zeros_like(img)
+        colored_mask[mask > 0] = [0, 255, 0] # green
+        overlayed_img = cv2.addWeighted(img, 0.7, colored_mask, 0.3, 0)
+
+        # extracting the file name
+        img_filename = os.path.basename(img_path)
+        overlayed_img_path = os.path.join(self.save_dir, img_filename)
+        cv2.imwrite(overlayed_img_path, overlayed_img)
+        print(f"saved overlayed image: {overlayed_img_path}")
+        
+        u_valid, v_valid, points_valid = self.project_pcd_to_image(pcd, img)
+        if points_valid  is None:
+                print(f"[{img_path}] No valid person points found. SKIPPING FRAME")
+                return None
+        
+        person_points = self.filter_human_points(u_valid, v_valid, points_valid, mask)
+        if person_points is None:
+                print(f"No 3D Human points found for mask in {img_path}. WARNING SKIPPING THIS FRAME")
+                return None 
+        
+        labels, clusters = self.DBSCAN_clustering(self.args.eps, self.args.min_points, person_points, img_path)
+        max_label = labels.max()
+        print(f"{img_path}: Found {max_label+1} clusters")
+
+        if max_label < 0:
+            print(f"No valid clusters in {img_path}. SKIPPING THIS FRAME")
+            return None
+        
+        # TODO: Better heuristic for human cluster
+        # For now, we assume the largest cluster is the human
+        human_cluster = max(clusters, key=lambda c: c.shape[0])
+        
+        
+        # estimating the depth
+        
+        depths = human_cluster[:, 1]  # y - axis looks like depth here
+
+        depths_sorted = np.sort(depths)
+        trim = int(len(depths_sorted) * self.args.trim)
+
+        # trim the 10% of the smallest and largest values and take the median
+        if len(depths_sorted) <= 2 * trim:
+            print(f"Not enough points to trim in {img_path}. Using all points.")
+            median_depth = np.median(depths_sorted)
+        else:
+
+            median_depth = np.median(depths_sorted[trim:-trim])
+            
+        result = {'depth': np.round(median_depth,2),
+                'human_mask': mask,
+                'person_bbox': person_bbox
+                 }
+        
+        return result 
+    
+    
 
 import argparse
 
@@ -256,7 +389,7 @@ def parse_args():
     return parser.parse_args()
 
 
-def main():
+def main(pf_flag=False):
     
     args = argparse.Namespace(
         img_dir='images',
@@ -272,6 +405,15 @@ def main():
         trim=0.1,
         vis=True  
     )
+    
+    if pf_flag:
+        img_path = '/home/krish/frame_forwarding/images/frame_00016.png'
+        pcd_path = '/home/krish/frame_forwarding/pcd/frame_00016.pcd'
+        estimator_pf = HumanDepthEstimatorPF(config_path=args.config, args=args)
+        result_pf = estimator_pf.run_on_frame(img_path, pcd_path)
+        for k, v in result_pf.items(): 
+            print(f"{k}: {v}")
+    
     
     estimator = HumanDepthEstimator(config_path=args.config, args=args)
     results = estimator.run()
@@ -299,4 +441,4 @@ def main():
             
 if __name__ == "__main__":
     # run this script if you want to visualize the point clouds
-    main()
+    main(pf_flag=False)
