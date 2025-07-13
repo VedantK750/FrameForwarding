@@ -1,0 +1,12 @@
+images/*.png
+images/*.pcd
+
+pcd/*.pcd
+overlayed_images/*.png
+
+*.pt
+
+__pycache__/
+*.pyc
+.env
+.vscode/
