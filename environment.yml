@@ -1,0 +1,15 @@
+name: frameforward
+channels:
+  - defaults
+  - conda-forge
+  - pytorch
+  - nvidia
+dependencies:
+  - python=3.10
+  - numpy
+  - opencv
+  - pyyaml
+  - pip
+  - pip:
+      - ultralytics==8.1.25
+      - open3d

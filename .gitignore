@@ -1,8 +1,7 @@
-images/*.png
-images/*.pcd
+**/*.png
+**/*.pcd
+**/*.jpg
 
-pcd/*.pcd
-overlayed_images/*.png
 
 *.pt
 

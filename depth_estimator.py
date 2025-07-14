@@ -258,9 +258,9 @@ class HumanDepthEstimatorPF(HumanDepthEstimator):
         Run depth estimation for a single RGB frame.
         Returns:
             dict: {
-                'depth': float,
-                'mask': np.ndarray,
-                'bbox': np.ndarray,
+                'depth': float,        estimated depth of human from the LiDAR
+                'mask': np.ndarray,    returns binary mask of the largest person
+                'bbox': np.ndarray,    returns the bbox of the roi
             }
         """
         """
@@ -298,7 +298,16 @@ class HumanDepthEstimatorPF(HumanDepthEstimator):
         cv2.rectangle(img, (x1, y1), (x2, y2), (0, 255, 0), 2)
         cropped_img = img[y1:y2, x1:x2]  
         seg_result = self.seg_model.predict(cropped_img, classes=[0], save=False)[0]
-        cropped_mask_data = seg_result.masks.data.cpu().numpy()[0] if seg_result.masks else None
+        
+        # handeling if there are mutiple person in roi ( taking the biggest mask area )
+        if seg_result.masks and len(seg_result.masks.data) > 0: 
+            masks_np = seg_result.masks.data.cpu().numpy()
+            areas = [np.sum(mask) for mask in masks_np]
+            max_idx = np.argmax(areas)
+            cropped_mask_data = masks_np[max_idx]
+        else:
+            return None
+        
         if cropped_mask_data is None:
             print(f"No segmentation mask for {img_path}. Skipping.")
             return None
@@ -414,30 +423,30 @@ def main(pf_flag=False):
         for k, v in result_pf.items(): 
             print(f"{k}: {v}")
     
-    
-    estimator = HumanDepthEstimator(config_path=args.config, args=args)
-    results = estimator.run()
-    depths = []
-    
-    for frame_name, (depth, human_cluster, scene_points) in results.items():
+    else:
+        estimator = HumanDepthEstimator(config_path=args.config, args=args)
+        results = estimator.run()
+        depths = []
         
-        print(f"{frame_name}: {depth:.2f}m")
-        
-        depths.append(depth)
-        
-        if args.vis:
-            human_pcd = o3d.geometry.PointCloud()
-            human_pcd.points = o3d.utility.Vector3dVector(human_cluster)
-            human_pcd.paint_uniform_color([1.0, 0.0, 0.0])  # Red
+        for frame_name, (depth, human_cluster, scene_points) in results.items():
+            
+            print(f"{frame_name}: {depth:.2f}m")
+            
+            depths.append(depth)
+            
+            if args.vis:
+                human_pcd = o3d.geometry.PointCloud()
+                human_pcd.points = o3d.utility.Vector3dVector(human_cluster)
+                human_pcd.paint_uniform_color([1.0, 0.0, 0.0])  # Red
 
-            scene_pcd = o3d.geometry.PointCloud()
-            scene_pcd.points = o3d.utility.Vector3dVector(scene_points)
-            scene_pcd.paint_uniform_color([0.5, 0.5, 0.5])  # Gray
-            
-            o3d.visualization.draw_geometries(
-            [scene_pcd, human_pcd], window_name=f"Scene with Human Cluster - {frame_name}")
-            
-    print(f"Depths : {depths}")
+                scene_pcd = o3d.geometry.PointCloud()
+                scene_pcd.points = o3d.utility.Vector3dVector(scene_points)
+                scene_pcd.paint_uniform_color([0.5, 0.5, 0.5])  # Gray
+                
+                o3d.visualization.draw_geometries(
+                [scene_pcd, human_pcd], window_name=f"Scene with Human Cluster - {frame_name}")
+                
+        print(f"Depths : {depths}")
             
 if __name__ == "__main__":
     # run this script if you want to visualize the point clouds

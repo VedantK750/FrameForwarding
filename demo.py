@@ -4,30 +4,33 @@ import os
 from ultralytics import YOLO
 from depth_estimator import HumanDepthEstimatorPF
 import argparse 
+import shutil
 
-# --- 1. CONFIGURATION ---
-
-# Input and Output paths
+# input
 PCD = '/home/krish/frame_forwarding/pcd'
 IMG = '/home/krish/frame_forwarding/images'
-SAVE = 'overlay_2'
 CONFIG = '/home/krish/frame_forwarding/config.yaml'
 
 # VIDEO_PATH = "/home/krish/Downloads/video_20250708_201255_edit(1).mp4"  # <--- CHANGE THIS to your input video file
 
+# output
 OUTPUT_MASK_FOLDER = "output_masks"
 OUTPUT_BEST_FRAME_FOLDER = "output_best_frames"
 
-# Model and Processing Parameters
-# YOLO_MODEL_PATH = "yolov8n-seg.pt"  # A small, fast segmentation model. It will be downloaded automatically.
-TEMPORAL_WINDOW_SIZE = 25          # The number of frames to consider in a temporal window.
-MIN_MASK_AREA_THRESHOLD = 5000      # Don't consider human masks with an area smaller than this (in pixels).
-CONFIDENCE_THRESHOLD = 0.5          # Confidence threshold for detecting a person.
 
-# --- 2. SETUP ---
+# constants
+TEMPORAL_WINDOW_SIZE = 25          
+MIN_MASK_AREA_THRESHOLD = 5000      
+CONFIDENCE_THRESHOLD = 0.5          
+
 
 def setup_directories():
     """Creates the necessary output directories if they don't exist."""
+    if os.path.exists(OUTPUT_MASK_FOLDER) and os.path.exists(OUTPUT_BEST_FRAME_FOLDER):
+        print(f"[demo] Removing existing dirs {OUTPUT_MASK_FOLDER} and {OUTPUT_BEST_FRAME_FOLDER}")
+        shutil.rmtree(OUTPUT_MASK_FOLDER)
+        shutil.rmtree(OUTPUT_BEST_FRAME_FOLDER)
+        
     os.makedirs(OUTPUT_MASK_FOLDER, exist_ok=True)
     os.makedirs(OUTPUT_BEST_FRAME_FOLDER, exist_ok=True)
     print(f"Output directories '{OUTPUT_MASK_FOLDER}' and '{OUTPUT_BEST_FRAME_FOLDER}' are ready.")
@@ -39,7 +42,7 @@ def setup_directories():
 #     print("Model loaded successfully.")
 #     return model
 
-# --- 3. CORE LOGIC ---
+
 
 def find_largest_human_mask(mask):
     """
@@ -74,11 +77,9 @@ def process_and_clear_window(window_data, window_count):
     if not window_data:
         return
 
-    # Find the best entry in the window (frame with the largest mask area)
     best_entry = max(window_data, key=lambda item: item[1])
     best_frame, best_area, best_frame_index = best_entry
 
-    # Save the best frame
     output_filename = os.path.join(OUTPUT_BEST_FRAME_FOLDER, f"best_frame_window_{window_count:03d}_frame_{best_frame_index:04d}.jpg")
     cv2.imwrite(output_filename, best_frame)
     
@@ -86,25 +87,27 @@ def process_and_clear_window(window_data, window_count):
     print(f"Found best frame at index {best_frame_index} with mask area {int(best_area)}.")
     print(f"Saved to: {output_filename}\n")
     
-    # Clear the window for the next batch
     window_data.clear()
 
 
-# --- 4. MAIN EXECUTION ---
+
 def parse_args():
     parser = argparse.ArgumentParser(description="Frame Forwarding Pipeline")
     parser.add_argument('--img_dir', type=str, default = IMG)
     parser.add_argument('--pcd_dir', type=str, default = PCD)
-    parser.add_argument('--save_dir', type=str, default=SAVE)
+    parser.add_argument('--save_dir', type=str, default=OUTPUT_MASK_FOLDER)
+    parser.add_argument('--save_best_dir', type=str, default=OUTPUT_BEST_FRAME_FOLDER)
     parser.add_argument('--config', type=str, default =CONFIG)
     parser.add_argument('--det_model', type=str, default='yolo11n.pt')
     parser.add_argument('--seg_model', type=str, default='yolo11m-seg.pt')
-    parser.add_argument('--seg_conf', type=float, default=0.5)
+    parser.add_argument('--seg_conf', type=float, default=CONFIDENCE_THRESHOLD)
     parser.add_argument('--padding', type=int, default=100)
     parser.add_argument('--eps', type=float, default=0.2)
     parser.add_argument('--min_points', type=int, default=50)
     parser.add_argument('--trim', type=float, default=0.1)
     parser.add_argument('--vis', action='store_true')
+    parser.add_argument('--WINDOW_SIZE', type=float, default=TEMPORAL_WINDOW_SIZE)
+    parser.add_argument('--MIN_MASK_AREA', type=float, default=MIN_MASK_AREA_THRESHOLD)
     return parser.parse_args()
 
 
@@ -142,14 +145,14 @@ def main():
 
         # If a valid mask was found
         if largest_mask is not None:
-            print(f"Frame {frame_index}: Found human mask with normalized area {int(area_depth_normalized)}.")
+            print(f"Frame {frame_index}: Found human mask with normalized area {int(area_depth_normalized)} with estimated depth as {depth} m.")
             
             # Save the individual mask
             mask_filename = os.path.join(OUTPUT_MASK_FOLDER, f"mask_{frame_index:04d}.png")
             cv2.imwrite(mask_filename, largest_mask)
             
-            # Add data to our temporal window
-            # We store a copy of the frame to avoid reference issues
+            # Add data to temporal window
+            # store a copy of the frame to avoid reference issues
             temporal_window_data.append((img.copy(), area_depth_normalized, frame_index))
 
         # Check if the temporal window is full
@@ -159,7 +162,7 @@ def main():
 
         frame_index += 1
 
-    # After the loop, process any remaining frames in the last (incomplete) window
+    # process any remaining frames in the last (incomplete) window
     if temporal_window_data:
         print("Processing the final batch of frames...")
         process_and_clear_window(temporal_window_data, window_count)
